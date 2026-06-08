@@ -6,8 +6,8 @@ import os
 # ============================
 #  НАСТРОЙКИ
 # ============================
-TOKEN = "MTUxMzYwOTg5ODA5OTg2Nzc5OA.GfAgkW.Dhifn648GX2ISKqJYszTd89uAE-_euG4SeXdsk"   # <-- замени на свой токен
-
+import os
+TOKEN = os.environ.get("TOKEN")
 # ============================
 #  ИНИЦИАЛИЗАЦИЯ
 # ============================
