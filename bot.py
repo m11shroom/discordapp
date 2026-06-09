@@ -3,297 +3,202 @@ from discord.ext import commands
 from discord import app_commands
 import os
 
-# ============================
-#  НАСТРОЙКИ
-# ============================
-import os
-TOKEN = os.environ.get("TOKEN")
-# ============================
-#  ИНИЦИАЛИЗАЦИЯ
-# ============================
+TOKEN = os.environ["TOKEN"]
+
 intents = discord.Intents.default()
 intents.message_content = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# active_games: {message_id: GameState}
+# active_games: {message_id: {"p1": user, "p2": user, "p1_choice": str, "p2_choice": str}}
 active_games = {}
 
+CHOICES = {
+    "rock":     "✊ Камень",
+    "scissors": "✌️ Ножницы",
+    "paper":    "🖐 Бумага",
+}
 
-# ============================
-#  ИГРОВОЕ СОСТОЯНИЕ
-# ============================
-class GameState:
-    def __init__(self, challenger: discord.User, opponent: discord.User, max_num: int):
-        self.challenger = challenger   # угадывает
-        self.opponent   = opponent     # загадывает
-        self.max_num    = max_num
-        self.secret     = None         # загаданное число (None пока не загадано)
-        self.attempts   = []           # список попыток [(число, "high"/"low"/"win")]
-        self.finished   = False
+BEATS = {
+    "rock":     "scissors",
+    "scissors": "paper",
+    "paper":    "rock",
+}
 
-    def guess(self, number: int) -> str:
-        if number < self.secret:
-            result = "low"
-        elif number > self.secret:
-            result = "high"
-        else:
-            result = "win"
-            self.finished = True
-        self.attempts.append((number, result))
-        return result
-
-    def render_board(self) -> str:
-        """Возвращает текстовое игровое поле."""
-        lines = []
-        for num, result in self.attempts:
-            if result == "low":
-                lines.append(f"📈  **{num}** — слишком мало")
-            elif result == "high":
-                lines.append(f"📉  **{num}** — слишком много")
-            else:
-                lines.append(f"✅  **{num}** — УГАДАЛ!")
-        return "\n".join(lines) if lines else "*Попыток ещё не было*"
+EMOJI = {
+    "rock": "✊",
+    "scissors": "✌️",
+    "paper": "🖐",
+}
 
 
-# ============================
-#  ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ: EMBED
-# ============================
-def build_embed(game: GameState, status: str = "playing") -> discord.Embed:
-    attempt_count = len(game.attempts)
+def get_result(p1_choice, p2_choice):
+    if p1_choice == p2_choice:
+        return "draw"
+    if BEATS[p1_choice] == p2_choice:
+        return "p1"
+    return "p2"
 
-    if status == "waiting":
-        color = discord.Color.yellow()
-        title = "🎮 Угадай число — ожидание"
-        desc = (
-            f"**{game.opponent.display_name}**, загадай число от **1** до **{game.max_num}**!\n"
-            f"Нажми кнопку «Загадать» ниже."
-        )
-    elif status == "playing":
-        color = discord.Color.blurple()
-        title = f"🎮 Угадай число | Попытка #{attempt_count + 1}"
-        desc = (
-            f"**{game.challenger.display_name}** угадывает число от **1** до **{game.max_num}**\n"
-            f"Загадал: **{game.opponent.display_name}**\n\n"
-            f"**История попыток:**\n{game.render_board()}"
-        )
-    elif status == "win":
-        color = discord.Color.green()
-        title = "🎉 Победа!"
-        secret = game.attempts[-1][0]
-        desc = (
-            f"**{game.challenger.display_name}** угадал число **{secret}** "
-            f"за **{attempt_count}** попыток!\n\n"
-            f"**История:**\n{game.render_board()}"
-        )
-    else:
-        color = discord.Color.red()
-        title = "🛑 Игра остановлена"
-        desc = game.render_board()
 
-    embed = discord.Embed(title=title, description=desc, color=color)
-    embed.set_footer(text=f"Challenger: {game.challenger.display_name} vs Setter: {game.opponent.display_name}")
+def build_waiting_embed(p1: discord.User, p2: discord.User, p1_done: bool, p2_done: bool):
+    desc = (
+        f"{('✅' if p1_done else '⏳')} **{p1.display_name}** — {'выбрал' if p1_done else 'думает...'}\n"
+        f"{('✅' if p2_done else '⏳')} **{p2.display_name}** — {'выбрал' if p2_done else 'думает...'}"
+    )
+    embed = discord.Embed(
+        title="✊ Камень-ножницы-бумага",
+        description=desc,
+        color=discord.Color.blurple(),
+    )
+    embed.set_footer(text="Нажми кнопку чтобы сделать ход — соперник не увидит твой выбор до конца")
     return embed
 
 
-# ============================
-#  МОДАЛКА: ЗАГАДАТЬ ЧИСЛО
-# ============================
-class SetNumberModal(discord.ui.Modal, title="Загадай число"):
-    def __init__(self, game: GameState, view: discord.ui.View, message: discord.Message):
-        super().__init__()
-        self.game    = game
-        self.view    = view
-        self.message = message
-        self.number_input = discord.ui.TextInput(
-            label=f"Введи число от 1 до {game.max_num}",
-            placeholder=f"Например: 42",
-            min_length=1,
-            max_length=len(str(game.max_num)),
-        )
-        self.add_item(self.number_input)
+def build_result_embed(p1: discord.User, p2: discord.User, p1_choice: str, p2_choice: str):
+    result = get_result(p1_choice, p2_choice)
 
-    async def on_submit(self, interaction: discord.Interaction):
-        raw = self.number_input.value.strip()
-        if not raw.isdigit():
-            await interaction.response.send_message("❌ Введи целое число!", ephemeral=True)
-            return
+    p1_line = f"**{p1.display_name}**: {EMOJI[p1_choice]} {p1_choice.capitalize()}"
+    p2_line = f"**{p2.display_name}**: {EMOJI[p2_choice]} {p2_choice.capitalize()}"
 
-        number = int(raw)
-        if number < 1 or number > self.game.max_num:
-            await interaction.response.send_message(
-                f"❌ Число должно быть от 1 до {self.game.max_num}!", ephemeral=True
-            )
-            return
+    if result == "draw":
+        title = "🤝 Ничья!"
+        color = discord.Color.light_grey()
+        winner_line = "Оба выбрали одно и то же!"
+    elif result == "p1":
+        title = f"🏆 Победил {p1.display_name}!"
+        color = discord.Color.green()
+        winner_line = f"{EMOJI[p1_choice]} бьёт {EMOJI[p2_choice]}"
+    else:
+        title = f"🏆 Победил {p2.display_name}!"
+        color = discord.Color.green()
+        winner_line = f"{EMOJI[p2_choice]} бьёт {EMOJI[p1_choice]}"
 
-        self.game.secret = number
-
-        # Обновляем сообщение на игровое поле
-        new_view = GameView(self.game, self.message)
-        embed = build_embed(self.game, status="playing")
-        await self.message.edit(embed=embed, view=new_view)
-        await interaction.response.send_message(
-            f"✅ Число загадано! Теперь **{self.game.challenger.display_name}** будет угадывать.",
-            ephemeral=True
-        )
+    embed = discord.Embed(
+        title=title,
+        description=f"{p1_line}\n{p2_line}\n\n{winner_line}",
+        color=color,
+    )
+    embed.set_footer(text="Нажми «Сыграть снова» для новой игры")
+    return embed
 
 
-# ============================
-#  МОДАЛКА: УГАДАТЬ ЧИСЛО
-# ============================
-class GuessModal(discord.ui.Modal, title="Угадай число"):
-    def __init__(self, game: GameState, message: discord.Message):
-        super().__init__()
-        self.game    = game
-        self.message = message
-        self.number_input = discord.ui.TextInput(
-            label=f"Твоя догадка (1 — {game.max_num})",
-            placeholder="Например: 50",
-            min_length=1,
-            max_length=len(str(game.max_num)),
-        )
-        self.add_item(self.number_input)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        raw = self.number_input.value.strip()
-        if not raw.isdigit():
-            await interaction.response.send_message("❌ Введи целое число!", ephemeral=True)
-            return
-
-        number = int(raw)
-        if number < 1 or number > self.game.max_num:
-            await interaction.response.send_message(
-                f"❌ Число должно быть от 1 до {self.game.max_num}!", ephemeral=True
-            )
-            return
-
-        result = self.game.guess(number)
-
-        if result == "win":
-            embed = build_embed(self.game, status="win")
-            await self.message.edit(embed=embed, view=None)
-            await interaction.response.send_message(
-                f"🎉 **{self.game.challenger.display_name}** угадал за {len(self.game.attempts)} попыток!",
-                ephemeral=False
-            )
-        else:
-            embed = build_embed(self.game, status="playing")
-            new_view = GameView(self.game, self.message)
-            await self.message.edit(embed=embed, view=new_view)
-            hint = "📈 Мало!" if result == "low" else "📉 Много!"
-            await interaction.response.send_message(
-                f"{hint} Попытка #{len(self.game.attempts)}",
-                ephemeral=True
-            )
-
-
-# ============================
-#  VIEW: КНОПКА «ЗАГАДАТЬ»
-# ============================
-class WaitingView(discord.ui.View):
-    def __init__(self, game: GameState, message_ref):
+class ChoiceView(discord.ui.View):
+    def __init__(self, game_id: int):
         super().__init__(timeout=300)
-        self.game        = game
-        self.message_ref = message_ref  # будет заполнено после отправки
+        self.game_id = game_id
 
-    @discord.ui.button(label="🤫 Загадать число", style=discord.ButtonStyle.success)
-    async def set_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.game.opponent.id:
-            await interaction.response.send_message(
-                "❌ Только **загадывающий** нажимает эту кнопку!", ephemeral=True
-            )
+    async def handle_choice(self, interaction: discord.Interaction, choice: str):
+        game = active_games.get(self.game_id)
+        if not game:
+            await interaction.response.send_message("❌ Игра не найдена.", ephemeral=True)
             return
-        modal = SetNumberModal(self.game, self, self.message_ref)
-        await interaction.response.send_modal(modal)
 
-
-# ============================
-#  VIEW: КНОПКИ ИГРЫ
-# ============================
-class GameView(discord.ui.View):
-    def __init__(self, game: GameState, message: discord.Message):
-        super().__init__(timeout=600)
-        self.game    = game
-        self.message = message
-
-    @discord.ui.button(label="🎯 Угадать", style=discord.ButtonStyle.primary)
-    async def guess_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.game.challenger.id:
-            await interaction.response.send_message(
-                "❌ Только **угадывающий** нажимает эту кнопку!", ephemeral=True
-            )
-            return
-        modal = GuessModal(self.game, self.message)
-        await interaction.response.send_modal(modal)
-
-    @discord.ui.button(label="🛑 Сдаться", style=discord.ButtonStyle.danger)
-    async def surrender_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id not in (self.game.challenger.id, self.game.opponent.id):
+        p1, p2 = game["p1"], game["p2"]
+        if interaction.user.id not in (p1.id, p2.id):
             await interaction.response.send_message("❌ Ты не участник этой игры.", ephemeral=True)
             return
-        self.game.finished = True
-        embed = build_embed(self.game, status="stopped")
-        embed.description = (
-            f"**{interaction.user.display_name}** сдался.\n"
-            f"Загаданное число было: **{self.game.secret}**\n\n"
-            + self.game.render_board()
+
+        is_p1 = interaction.user.id == p1.id
+
+        if is_p1 and game["p1_choice"]:
+            await interaction.response.send_message("⚠️ Ты уже сделал ход!", ephemeral=True)
+            return
+        if not is_p1 and game["p2_choice"]:
+            await interaction.response.send_message("⚠️ Ты уже сделал ход!", ephemeral=True)
+            return
+
+        if is_p1:
+            game["p1_choice"] = choice
+        else:
+            game["p2_choice"] = choice
+
+        await interaction.response.send_message(
+            f"✅ Ты выбрал {EMOJI[choice]} — ждём соперника!", ephemeral=True
         )
-        await self.message.edit(embed=embed, view=None)
-        await interaction.response.send_message("🛑 Игра завершена.", ephemeral=True)
+
+        p1_done = bool(game["p1_choice"])
+        p2_done = bool(game["p2_choice"])
+
+        if p1_done and p2_done:
+            embed = build_result_embed(p1, p2, game["p1_choice"], game["p2_choice"])
+            view = PlayAgainView(p1, p2)
+            del active_games[self.game_id]
+            await interaction.message.edit(embed=embed, view=view)
+        else:
+            embed = build_waiting_embed(p1, p2, p1_done, p2_done)
+            await interaction.message.edit(embed=embed, view=self)
+
+    @discord.ui.button(label="✊ Камень",   style=discord.ButtonStyle.primary)
+    async def rock(self, interaction, button):
+        await self.handle_choice(interaction, "rock")
+
+    @discord.ui.button(label="✌️ Ножницы", style=discord.ButtonStyle.secondary)
+    async def scissors(self, interaction, button):
+        await self.handle_choice(interaction, "scissors")
+
+    @discord.ui.button(label="🖐 Бумага",  style=discord.ButtonStyle.secondary)
+    async def paper(self, interaction, button):
+        await self.handle_choice(interaction, "paper")
 
 
-# ============================
-#  SLASH-КОМАНДА /угадай
-# ============================
-@bot.tree.command(name="угадай", description="Начать игру Угадай число с другим игроком")
-@app_commands.describe(
-    opponent="Игрок, который будет загадывать число",
-    maximum="Максимальное число (по умолчанию 100)"
-)
-async def slash_guess(
-    interaction: discord.Interaction,
-    opponent: discord.User,
-    maximum: int = 100
-):
+class PlayAgainView(discord.ui.View):
+    def __init__(self, p1: discord.User, p2: discord.User):
+        super().__init__(timeout=300)
+        self.p1 = p1
+        self.p2 = p2
+
+    @discord.ui.button(label="🔄 Сыграть снова", style=discord.ButtonStyle.success)
+    async def again(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id not in (self.p1.id, self.p2.id):
+            await interaction.response.send_message("❌ Ты не участник этой игры.", ephemeral=True)
+            return
+
+        embed = build_waiting_embed(self.p1, self.p2, False, False)
+        view = ChoiceView(game_id=0)
+
+        await interaction.response.edit_message(embed=embed, view=view)
+        msg = await interaction.original_response()
+
+        view.game_id = msg.id
+        active_games[msg.id] = {
+            "p1": self.p1,
+            "p2": self.p2,
+            "p1_choice": "",
+            "p2_choice": "",
+        }
+
+
+@bot.tree.command(name="кнб", description="Сыграть в камень-ножницы-бумагу с другим игроком")
+@app_commands.describe(opponent="Игрок с которым хочешь сыграть")
+async def knb(interaction: discord.Interaction, opponent: discord.User):
     if opponent.bot:
         await interaction.response.send_message("❌ Нельзя играть с ботом.", ephemeral=True)
         return
     if opponent.id == interaction.user.id:
         await interaction.response.send_message("❌ Нельзя играть с самим собой.", ephemeral=True)
         return
-    if maximum < 2:
-        await interaction.response.send_message("❌ Максимум должен быть не меньше 2.", ephemeral=True)
-        return
 
-    game = GameState(
-        challenger=interaction.user,
-        opponent=opponent,
-        max_num=maximum
-    )
+    p1 = interaction.user
+    p2 = opponent
 
-    embed = build_embed(game, status="waiting")
+    embed = build_waiting_embed(p1, p2, False, False)
+    view = ChoiceView(game_id=0)
 
-    # Отправляем сообщение — потом передадим его в View
-    await interaction.response.send_message(embed=embed)
-    message = await interaction.original_response()
+    await interaction.response.send_message(embed=embed, view=view)
+    msg = await interaction.original_response()
 
-    view = WaitingView(game, message)
-    view.message_ref = message
-    await message.edit(view=view)
+    view.game_id = msg.id
+    active_games[msg.id] = {
+        "p1": p1,
+        "p2": p2,
+        "p1_choice": "",
+        "p2_choice": "",
+    }
 
 
-# ============================
-#  СИНХРОНИЗАЦИЯ КОМАНД
-# ============================
 @bot.event
 async def on_ready():
     await bot.tree.sync()
     print(f"✅ Бот запущен как {bot.user}")
-    print(f"   Slash-команды синхронизированы!")
-    print(f"   Ссылка для добавления: https://discord.com/oauth2/authorize?client_id={bot.user.id}&scope=bot+applications.commands&permissions=2048")
 
 
-# ============================
-#  ЗАПУСК
-# ============================
 bot.run(TOKEN)
